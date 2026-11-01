@@ -229,7 +229,7 @@ warn_battery() {   # $1 = 1 if disablesleep is (going to be) in effect
   fi
   printf '\033[0m\n'
 } >&2
-running() { [ -f "$PIDF" ] && ps -p "$(cat "$PIDF")" -o command= 2>/dev/null | grep -q 'awake _run'; }
+running() { [ -f "$PIDF" ] && ps -p "$(cat "$PIDF")" -o command= 2>/dev/null | grep -qE 'awake(\.sh)? _run'; }
 # password: --password flag > keychain item "awake" (store with `awake setpw`) > prompt
 getpw() {
   [ -n "$PW" ] && return
