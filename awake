@@ -1,0 +1,268 @@
+#!/bin/bash
+# awake on [hours] [--display] [--password PW] | off | setpw | status -- never sleep, never lock, no screen saver;
+# display may still turn off per System Settings (unless --display)
+# (default 6h, 0 = until `awake off`). `on` asks for your login password once (sysadminctl needs it to
+# change the lock delay); the background supervisor keeps it in memory only and restores the old delay on exit.
+PIDF=$HOME/.awake.pid
+PREVF=$HOME/.awake.lockdelay   # lock delay to restore; exists only while lock is relaxed
+SSF=$HOME/.awake.ssidle        # screen saver idleTime to restore (seconds or "unset"); exists only while saver is disabled
+LOGF=$HOME/.awake.log
+help() { cat <<'EOT'
+AWAKE(1)                      User Commands                      AWAKE(1)
+
+NAME
+    awake - keep the Mac from sleeping or locking, on demand
+
+SYNOPSIS
+    awake on [HOURS] [--display] [--password PW]
+    awake off [--password PW]
+    awake status
+    awake setpw
+    awake --help | -h | help
+
+DESCRIPTION
+    While "on", the Mac will not go to sleep by itself, the screen will
+    not lock (no password needed on wake), and the screen saver will not
+    start. By default the display is NOT held on: it still turns off on the
+    normal System Settings timer (use --display to keep it on). "off" returns
+    the Mac to its normal behaviour.
+
+COMMANDS
+    on [HOURS]
+        Start. HOURS is optional; default 6. HOURS=0 means no timeout (until
+        `awake off`). Integers only. If already on, prints the pid and exits;
+        a different HOURS is ignored (run `awake off` first).
+    off
+        Stop caffeinate, restore the saved screen-lock delay and screen
+        saver idle time, remove state.
+        Also repairs a stale state left by a crash or reboot (see EDGE CASES).
+    status
+        Prints ON/off, the current screen-lock delay, the screen saver
+        idleTime, and any assertion
+        currently preventing idle system sleep (from any process, not only awake).
+    setpw
+        Store your login password in the login keychain (item "awake",
+        account $USER). `security` prompts for it without echo.
+    --help, -h, help
+        This page. Accepted anywhere on the command line.
+
+OPTIONS
+    --display
+        (on only) Also keep the display on (adds -d to caffeinate). Holding a
+        display-sleep assertion is the most reliable way to prevent the screen
+        saver: loginwindow skips the idle saver while display sleep is blocked
+        ("PMNoDisplaySleepEnabled so do not launch screen saver"). Use it if
+        the saver still starts with idleTime 0 alone.
+    --password PW, --password=PW
+        Use PW as the login password for this run. Visible in `ps` and shell
+        history while it runs; prefer setpw or the prompt.
+
+PASSWORD SOURCES (first match wins)
+    1. --password flag
+    2. keychain item "awake" (security find-generic-password -s awake)
+    3. interactive prompt (no echo)
+    Needed on `on` (to disable the lock) and again to restore it if the
+    background supervisor is gone when you run `off`.
+
+DESIGN
+    Three independent concerns, handled by three mechanisms:
+    Sleep:   `caffeinate -i -s [-d] [-t SECONDS]`
+             -i  prevents idle system sleep.
+             -s  prevents system sleep, but only while on AC power.
+             -d  only with --display: keeps the display on.
+             Never -u (does not wake display).
+    Lock:    `sysadminctl -screenLock off -password -`
+             The lock is the "require password after screen saver / display
+             off" delay. macOS only changes it if given the user's login
+             password; root/sudo/Touch ID are not sufficient, which is why
+             awake needs the password at all. `-password -` reads it from
+             stdin, so it is not placed on argv (except via --password).
+    Saver:   `defaults -currentHost write com.apple.screensaver idleTime -int 0`
+             (0 = never). With no idleTime set, macOS starts the saver at
+             display-sleep time, and loginwindow then raises its shield, so
+             the session reads as locked (CGSSessionScreenIsLocked=1) even
+             with the lock off. No password needed. The old value (or
+             "unset") is restored exactly on exit.
+    awake does not touch pmset or display-sleep settings.
+
+HOW IT WORKS
+    on:   read password -> record current lock delay in ~/.awake.lockdelay
+          -> set lock off -> verify the delay no longer reads as a number
+          (else abort and discard the record) -> record screen saver
+          idleTime (or "unset") in ~/.awake.ssidle -> set idleTime 0 ->
+          start a detached supervisor `awake _run HOURS [--display]` with
+          the password on its stdin -> write supervisor pid to ~/.awake.pid.
+    supervisor: runs caffeinate, waits for it. When caffeinate exits (timer
+          expired) or the supervisor gets TERM/INT/HUP, it restores the saved
+          idleTime and lock delay and deletes ~/.awake.pid. The password
+          lives only in its memory.
+    off:  sends TERM to the supervisor, waits up to 5s for it to restore;
+          if ~/.awake.ssidle or ~/.awake.lockdelay still exists, restores it
+          itself (idleTime needs no password).
+    Start, stop and restores are logged with timestamps to ~/.awake.log.
+
+FILES
+    ~/.awake.pid         supervisor pid; present only while on
+    ~/.awake.lockdelay   lock delay to restore (seconds or "immediate");
+                         present only while the lock is relaxed
+    ~/.awake.ssidle      screen saver idleTime to restore (seconds or
+                         "unset"); present only while the saver is disabled
+    ~/.awake.log         append-only log of start/stop/restore
+    keychain item "awake"  optional stored login password
+
+NUANCES
+    - "Never sleep" is strongest on AC. On battery -s has no effect; only -i
+      applies, which stops IDLE sleep but not lid-close, low-battery, or
+      thermal sleep.
+    - Closing the lid generally sleeps the Mac regardless (clamshell mode
+      needs AC plus an external display).
+    - The display turning off is intended (unless --display). On AC it
+      follows System Settings > Battery/Lock Screen; check with
+      `pmset -g custom` (displaysleep 0 = never turns off).
+    - idleTime 0 takes effect without logout: loginwindow re-reads it each
+      time it re-arms its idle timer (verified on macOS 26: log shows
+      "idleTime: 0 ... targetUserIdle = 0.0"), so not instantly but within
+      one idle period or on the next activity/display event.
+      If the saver still appears, use --display (see OPTIONS).
+    - While on, System Settings > Lock Screen shows the saver as "Never";
+      changing it there while on is overwritten by the restore on exit.
+    - Starting `on` while on battery prints a loud red banner, rings the
+      terminal bell, and pauses 3s (Ctrl-C to cancel) before continuing;
+      `status` repeats the banner if it is still on while on battery. It
+      does not block, and it does not alert if you unplug later.
+    - While on, anyone with physical access can use the Mac once the display
+      wakes. Do not leave it on unattended in public.
+    - Other caffeinate processes or apps holding sleep assertions are
+      untouched and keep working; `status` lists them.
+    - The keychain item is readable by processes running as you once you
+      click "Always Allow"; without it you get a Keychain dialog each time.
+    - The "lock really changed" check is a heuristic: it fails only if
+      sysadminctl still reports a numeric delay or "immediate".
+
+EDGE CASES
+    - Wrong password: on aborts, lock unchanged, no state kept.
+    - Supervisor killed with SIGKILL, or reboot/power loss while on:
+      caffeinate dies, but the lock stays OFF and ~/.awake.lockdelay remains.
+      Run `awake off` (asks for the password) to restore it. Until then the
+      Mac is unlocked. ~/.awake.ssidle likewise remains and the saver stays
+      disabled; `awake off` restores it too (no password needed for that).
+    - Stale ~/.awake.pid with a reused pid: the pid is only trusted if its
+      command line contains "awake _run".
+    - `on` after an unclean death keeps the ORIGINAL saved delay rather than
+      recording the relaxed (off) state; same for the saved idleTime.
+    - Wrong password on `on`: the saver is not touched (idleTime is only
+      changed after the lock change is verified).
+    - Password changed after storing it: restore/disable fails; re-run
+      `awake setpw`.
+    - Password containing a newline is unsupported.
+    - Sleep forced by the system (critical battery, overheating, Apple menu
+      > Sleep, power button) cannot be prevented.
+
+EXIT STATUS
+    0 success; 1 failed to disable the lock, or bad usage.
+
+EXAMPLES
+    awake setpw            # one-time
+    awake on               # 6 hours
+    awake on 2             # 2 hours
+    awake on 0             # until `awake off`
+    awake on 12 --display  # 12 hours, display kept on too
+    awake status
+    awake off
+
+SEE ALSO
+    caffeinate(8), pmset(1), sysadminctl(8), security(1), defaults(1)
+EOT
+}
+on_battery() { pmset -g batt | head -1 | grep -q "Battery Power"; }
+warn_battery() {
+  local pct; pct=$(pmset -g batt | grep -oE '[0-9]+%' | head -1)
+  printf '\a\a\a\033[1;97;41m\n'
+  echo "  !!!  ON BATTERY (${pct:-?})  !!!  "
+  echo "  awake will drain the battery and the Mac will NOT lock.  "
+  echo "  Only idle sleep is blocked (-s is AC-only); lid close, low battery  "
+  echo "  and thermal sleep still apply. Plug in, or Ctrl-C now.  "
+  printf '\033[0m\n'
+} >&2
+running() { [ -f "$PIDF" ] && ps -p "$(cat "$PIDF")" -o command= 2>/dev/null | grep -q 'awake _run'; }
+# password: --password flag > keychain item "awake" (store with `awake setpw`) > prompt
+getpw() {
+  [ -n "$PW" ] && return
+  PW=$(security find-generic-password -s awake -a "$USER" -w 2>/dev/null) && [ -n "$PW" ] && return
+  read -rsp "login password ($1): " PW; echo
+}
+lockset() { sysadminctl -screenLock "$1" -password - <<<"$PW" 2>&1; }  # needs $PW
+lockstate() { sysadminctl -screenLock status 2>&1; }
+alog() { echo "$(date '+%F %T') [$$] $*" >> "$LOGF"; }
+# screen saver idleTime: save once (keeps original after an unclean death), set 0 = never; restore exact prior state
+ssread() { defaults -currentHost read com.apple.screensaver idleTime 2>/dev/null || echo unset; }
+ssoff() {
+  [ -f "$SSF" ] || ssread > "$SSF"
+  defaults -currentHost write com.apple.screensaver idleTime -int 0
+  alog "saver: idleTime $(cat "$SSF") -> $(ssread)"
+}
+ssrestore() {
+  local prev; prev=$(cat "$SSF" 2>/dev/null) || return 0
+  case "$prev" in unset|'') defaults -currentHost delete com.apple.screensaver idleTime 2>/dev/null ;;
+    *) defaults -currentHost write com.apple.screensaver idleTime -int "$prev" ;; esac
+  rm -f "$SSF"; alog "saver: restored idleTime to $prev (reads $(ssread))"
+}
+restore() {   # saver first: needs no password, so it runs even if the lock restore fails
+  ssrestore
+  local prev; prev=$(cat "$PREVF" 2>/dev/null) || return 0
+  lockset "${prev:-300}" >/dev/null; rm -f "$PREVF"; alog "lock: restored delay to ${prev:-300}"
+}
+for a in "$@"; do case "$a" in --help|-h|help) help; exit 0 ;; esac; done
+cmd=${1:-status}; shift; PW=; DISP=; pos=()
+while [ $# -gt 0 ]; do
+  case "$1" in --display) DISP=1; shift ;; --password) PW=$2; shift 2 ;; --password=*) PW=${1#*=}; shift ;; *) pos+=("$1"); shift ;; esac
+done
+set -- "$cmd" "${pos[@]}"
+case "$cmd" in
+  on)
+    running && { echo "already on (pid $(cat "$PIDF"))"; exit 0; }
+    h=${2:-6}
+    on_battery && { warn_battery; sleep 3; }
+    getpw "to disable screen lock"
+    st=$(lockstate)
+    if [ ! -f "$PREVF" ]; then   # keep original value if a previous run died uncleanly
+      case "$st" in *immediate*) echo immediate > "$PREVF" ;; *) echo "$st" | grep -oE '[0-9]+ seconds' | cut -d' ' -f1 > "$PREVF" ;; esac
+      [ -s "$PREVF" ] || echo 300 > "$PREVF"
+    fi
+    lockset off >/dev/null
+    if lockstate | grep -qE 'delay is [0-9]+ seconds|immediate'; then
+      echo "failed to disable lock (wrong password?): $(lockstate)"; rm -f "$PREVF"; alog "on: failed to disable lock"; exit 1
+    fi
+    ssoff
+    nohup "$0" _run "$h" ${DISP:+--display} <<<"$PW" >/dev/null 2>&1 &
+    echo $! > "$PIDF"; disown
+    alog "on: ${h}h${DISP:+ --display}, lock delay was $(cat "$PREVF"), supervisor pid $!"
+    echo "awake on ($([ "$h" = 0 ] && echo until off || echo "${h}h")), lock + screen saver disabled${DISP:+, display kept on}, pid $!" ;;
+  _run)   # supervisor: password on stdin
+    read -r PW
+    args=(-i -s); [ -n "$DISP" ] && args+=(-d); [ "$2" != 0 ] && args+=(-t $((${2:-6} * 3600)))
+    caffeinate "${args[@]}" & cpid=$!; alog "supervisor: caffeinate ${args[*]} (pid $cpid)"
+    trap 'kill $cpid 2>/dev/null' TERM INT HUP
+    while kill -0 $cpid 2>/dev/null; do wait $cpid; done
+    alog "supervisor: caffeinate ended, restoring"; restore; rm -f "$PIDF"; alog "supervisor: exit" ;;
+  off)
+    if running; then
+      kill "$(cat "$PIDF")"
+      for _ in 1 2 3 4 5 6 7 8 9 10; do running || break; sleep 0.5; done
+    fi
+    alog "off: requested"
+    ssrestore   # no-op unless the supervisor died without restoring
+    if [ -f "$PREVF" ]; then   # supervisor gone without restoring (crash/reboot)
+      getpw "to restore screen lock"; restore
+    fi
+    rm -f "$PIDF"; echo "awake off; $(lockstate | sed 's/^[^ ]* [^ ]* //'); screen saver idleTime $(ssread)" ;;
+  setpw)   # store login password in keychain (prompted by `security`)
+    security add-generic-password -U -s awake -a "$USER" -w && echo "stored in keychain item 'awake'" ;;
+  status)
+    running && echo "awake: ON (pid $(cat "$PIDF"))" || echo "awake: off"
+    running && on_battery && warn_battery
+    lockstate | sed 's/^[^ ]* [^ ]* [^ ]* //'
+    echo "screen saver idleTime: $(ssread)$([ -f "$SSF" ] && echo " (saved: $(cat "$SSF"))")"
+    pmset -g assertions | grep -E 'PreventUserIdleSystemSleep +[0-9]' ;;
+  *) echo "usage: awake on [hours] [--display] [--password PW] | off | setpw | status | --help"; exit 1 ;;
+esac
