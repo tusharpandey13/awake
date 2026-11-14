@@ -3,7 +3,8 @@
 # (even lid closed), never lock, no screen saver; display may still turn off per System Settings (unless --display)
 # (default 6h, 0 = until `awake off`). `on` asks for your login password once (sysadminctl needs it to
 # change the lock delay); the background supervisor keeps it in memory only and restores the old delay on exit.
-# `on` also runs `sudo pmset -a disablesleep 1`; a root guard started then restores it when the supervisor exits.
+# `on` also runs `sudo pmset -a disablesleep 1`; a guard started then restores it when the supervisor exits.
+# `awake sudoers` prints a rule that makes that passwordless, so `on` never prompts.
 PIDF=$HOME/.awake.pid
 PREVF=$HOME/.awake.lockdelay   # lock delay to restore; exists only while lock is relaxed
 SSF=$HOME/.awake.ssidle        # screen saver idleTime to restore (seconds or "unset"); exists only while saver is disabled
@@ -23,6 +24,7 @@ SYNOPSIS
     awake off [--password PW]
     awake status
     awake setpw
+    awake sudoers
     awake --help | -h | help
 
 DESCRIPTION
@@ -48,6 +50,15 @@ COMMANDS
     setpw
         Store your login password in the login keychain (item "awake",
         account $USER). `security` prompts for it without echo.
+    sudoers
+        Print a sudoers rule that lets you run exactly `pmset -a disablesleep
+        0` and `... 1` as root without a password, so `on` never prompts
+        (no Touch ID sheet). Install it, validated, with:
+          awake sudoers > /tmp/awake.sudoers &&
+          sudo visudo -cf /tmp/awake.sudoers &&
+          sudo install -m 440 -o root -g wheel /tmp/awake.sudoers /etc/sudoers.d/awake
+        Remove: sudo rm /etc/sudoers.d/awake. Effect: any process running as
+        you can toggle disablesleep (nothing else; no root shell).
     --help, -h, help
         This page. Accepted anywhere on the command line.
 
@@ -92,10 +103,12 @@ DESIGN
              Never -u (does not wake display).
     Lid:     `sudo pmset -a disablesleep 1`
              Also blocks lid-close sleep, on AC and battery. Restoring must
-             work unattended when the timer expires, so sudo is only used
-             while you are here: `on` also starts a root guard (`sudo -b`) that
-             polls the supervisor pid and restores the old value when it is
-             gone, whatever killed it. No password is kept for this.
+             work unattended when the timer expires. With the rule from
+             `awake sudoers`, `on` starts a guard as you that polls the
+             supervisor pid and runs `sudo -n pmset` when it is gone,
+             whatever killed it. Without the rule, sudo is only used while
+             you are here: `on` asks for sudo and starts the same guard as
+             root (`sudo -b`). No password is kept either way.
     Lock:   `sysadminctl -screenLock off -password -`
              The lock is the "require password after screen saver / display
              off" delay. macOS only changes it if given the user's login
@@ -111,7 +124,8 @@ DESIGN
     awake does not touch display-sleep settings.
 
 HOW IT WORKS
-    on:   authenticate sudo (abort if that fails; nothing changed yet) ->
+    on:   unless the sudoers rule is installed, authenticate sudo (abort if
+          that fails; nothing changed yet) ->
           read password -> record current lock delay in ~/.awake.lockdelay
           -> set lock off -> verify the delay no longer reads as a number
           (else abort and discard the record) -> record screen saver
@@ -119,12 +133,12 @@ HOW IT WORKS
           set disablesleep 1, recording the old value in ~/.awake.disablesleep
           -> start a detached supervisor `awake _run HOURS [--display]` with
           the password on its stdin -> write supervisor pid to ~/.awake.pid
-          -> start the root guard on that pid.
+          -> start the guard on that pid.
     supervisor: runs caffeinate, waits for it. When caffeinate exits (timer
           expired) or the supervisor gets TERM/INT/HUP, it restores the saved
           idleTime and lock delay and deletes ~/.awake.pid. The password
           lives only in its memory.
-    guard: root; when the supervisor pid is gone, restores disablesleep and
+    guard: you (sudoers rule) or root; when the supervisor pid is gone, restores disablesleep and
           deletes ~/.awake.disablesleep.
     off:  sends TERM to the supervisor, waits up to 10s for it and the guard
           to restore; if ~/.awake.ssidle, ~/.awake.disablesleep or
@@ -271,12 +285,17 @@ sleepoff() {
   sudo -n pmset -a disablesleep 1 || return 1
   echo "$prev" > "$SLF"; alog "sleep: disablesleep $prev -> $(sleepread)"
 }
-# root guard: restores when pid $1 is gone. kill -0 not `running`: the pid has not exec'd `awake _run` yet
+# sudoers rule from `awake sudoers` installed? -k ignores a cached sudo login, so only the rule counts
+nopw() { sudo -k -n -l pmset -a disablesleep 0 >/dev/null 2>&1 && sudo -k -n -l pmset -a disablesleep 1 >/dev/null 2>&1; }
+# guard: restores when pid $1 is gone. kill -0 not `running`: the pid has not exec'd `awake _run` yet.
+# Runs as you if the sudoers rule allows pmset without a password, else as root (sudo -b) while sudo is fresh.
 sleepguard() {
-  sudo -n -b /bin/sh -c 'trap "" HUP
+  local body='trap "" HUP
     while kill -0 "$1" 2>/dev/null; do sleep 2; done
-    pmset -a disablesleep "$2" && rm -f "$3" && echo "$(date "+%F %T") [$$] guard: restored disablesleep to $2" >> "$4"' \
-    awake-guard "$1" "$(cat "$SLF")" "$SLF" "$LOGF" </dev/null >/dev/null 2>&1 \
+    sudo -n pmset -a disablesleep "$2" && rm -f "$3" && echo "$(date "+%F %T") [$$] guard: restored disablesleep to $2" >> "$4"'
+  local a=(awake-guard "$1" "$(cat "$SLF")" "$SLF" "$LOGF")
+  if [ "$NOPW" = 1 ]; then nohup /bin/sh -c "$body" "${a[@]}" </dev/null >/dev/null 2>&1 & disown
+  else sudo -n -b /bin/sh -c "$body" "${a[@]}" </dev/null >/dev/null 2>&1; fi \
     || { echo "warning: sleep guard not started; disablesleep stays 1 until \`awake off\`" >&2; alog "sleep: guard failed"; }
 }
 sleeprestore() {   # interactive path for `off`, when the guard is gone
@@ -331,7 +350,7 @@ case "$cmd" in
     h=${2:-$hours}
     on_battery && warn_battery "$disablesleep"
     if [ "$disablesleep" = 1 ]; then   # authenticate while someone is here, before anything changes
-      sudo -v || { echo "sudo failed, nothing changed (--noroot skips disablesleep)"; alog "on: sudo failed"; exit 1; }
+      if nopw; then NOPW=1; else sudo -v || { echo "sudo failed, nothing changed (--noroot skips disablesleep)"; alog "on: sudo failed"; exit 1; }; fi
     elif [ -f "$SLF" ]; then
       echo "warning: disablesleep still set by a previous run; \`awake off\` restores it" >&2
     fi
@@ -378,6 +397,8 @@ case "$cmd" in
       getpw "to restore screen lock"; restore
     fi
     rm -f "$PIDF"; echo "awake off; $(lockstate | sed 's/^[^ ]* [^ ]* //'); screen saver idleTime $(ssread); SleepDisabled $(sleepread)" ;;
+  sudoers)   # rule for /etc/sudoers.d/awake: `on` then never prompts; install steps in --help
+    echo "$USER ALL=(root) NOPASSWD: /usr/bin/pmset -a disablesleep 0, /usr/bin/pmset -a disablesleep 1" ;;
   setpw)   # store login password in keychain (prompted by `security`)
     security add-generic-password -U -s awake -a "$USER" -w && echo "stored in keychain item 'awake'" ;;
   status)
@@ -387,5 +408,5 @@ case "$cmd" in
     echo "screen saver idleTime: $(ssread)$([ -f "$SSF" ] && echo " (saved: $(cat "$SSF"))")"
     echo "SleepDisabled: $(sleepread)$([ -f "$SLF" ] && echo " (saved: $(cat "$SLF"))")"
     pmset -g assertions | grep -E 'PreventUserIdleSystemSleep +[0-9]' ;;
-  *) echo "usage: awake on [hours] [--display] [--noroot|--allowlidsleep] [--password PW] | off | setpw | status | --help"; exit 1 ;;
+  *) echo "usage: awake on [hours] [--display] [--noroot|--allowlidsleep] [--password PW] | off | setpw | status | sudoers | --help"; exit 1 ;;
 esac

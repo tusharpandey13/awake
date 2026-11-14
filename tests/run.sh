@@ -20,7 +20,7 @@ cat > "$S/sudo" <<'E'
 echo "sudo $*" >> "$ST/sudo.log"
 [ -f "$ST/sudofail" ] && exit 1
 bg=
-while :; do case "$1" in -v) exit 0 ;; -n) shift ;; -b) bg=1; shift ;; *) break ;; esac; done
+while :; do case "$1" in -v) exit 0 ;; -n|-k) shift ;; -b) bg=1; shift ;; -l) [ -f "$ST/nopw" ]; exit ;; *) break ;; esac; done
 export ROOT=1
 if [ -n "$bg" ]; then "$@" & exit 0; else exec "$@"; fi
 E
@@ -47,7 +47,7 @@ pass=0; fail=0
 ok() { if eval "$2"; then echo "ok   $1"; pass=$((pass+1)); else echo "FAIL $1 [$2]"; fail=$((fail+1)); fi; }
 sd() { cat "$ST/sd"; }
 waitgone() { for _ in {1..20}; do [ -f "$HOME/.awake.disablesleep" ] || return 0; sleep .5; done; }
-reset() { "$A" off --password pw >/dev/null 2>&1; rm -f "$ST/sudo.log" "$ST/sudofail" "$HOME/.awake.conf" "$ST/caf.log" "$ST/bright.log" "$ST/batt"; echo No > "$ST/lid"; echo "${1:-0}" > "$ST/sd"; }
+reset() { "$A" off --password pw >/dev/null 2>&1; rm -f "$ST/sudo.log" "$ST/sudofail" "$HOME/.awake.conf" "$ST/caf.log" "$ST/bright.log" "$ST/batt" "$ST/nopw"; echo No > "$ST/lid"; echo "${1:-0}" > "$ST/sd"; }
 
 "$A" status >/dev/null
 ok "config created, all commented" '[ -f $HOME/.awake.conf ] && ! grep -qE "^[a-z]" $HOME/.awake.conf'
@@ -107,6 +107,12 @@ ok "config hours/display applied"  'grep -q -- "-d -t 10800" $ST/caf.log'
 reset; echo "hours=3" > "$HOME/.awake.conf"; "$A" on 2 --noroot --password pw >/dev/null; sleep 1
 ok "flag HOURS beats config"       'grep -q -- "-t 7200" $ST/caf.log'
 "$A" off >/dev/null
+
+reset; touch "$ST/nopw"; "$A" on 1 --password pw >/dev/null
+ok "sudoers rule: no sudo -v, no root guard" '! grep -qE "sudo (-v|.*-b)" $ST/sudo.log && [ "$(sd)" = 1 ]'
+pid=$(cat "$HOME/.awake.pid"); pkill -P "$pid"; waitgone
+ok "sudoers rule: guard as you restores" '[ "$(sd)" = 0 ] && [ ! -f $HOME/.awake.disablesleep ]'
+ok "sudoers rule printed"          '"$A" sudoers | grep -q "NOPASSWD: /usr/bin/pmset -a disablesleep 0, /usr/bin/pmset -a disablesleep 1"'
 
 reset; touch "$ST/batt"; SECONDS=0; out=$("$A" on 1 --password pw 2>&1)
 ok "battery: loud warning"         'echo "$out" | grep -q "ON BATTERY"'

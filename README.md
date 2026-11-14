@@ -37,6 +37,18 @@ awake setpw         # optional: store your login password in the keychain
 | `--noroot`, `--allowlidsleep` | Synonyms: don't run `sudo pmset -a disablesleep 1` |
 | `--password PW` | Use this login password. It's visible in `ps` and shell history, so prefer `setpw` |
 
+### Skip the sudo prompt (optional)
+
+`awake on` asks for sudo (Touch ID or password) to change `disablesleep`. To skip it, install a sudoers rule that allows only `pmset -a disablesleep 0` and `pmset -a disablesleep 1` without a password:
+
+```sh
+awake sudoers > /tmp/awake.sudoers &&
+sudo visudo -cf /tmp/awake.sudoers &&
+sudo install -m 440 -o root -g wheel /tmp/awake.sudoers /etc/sudoers.d/awake
+```
+
+Any process running as you can then toggle `disablesleep`, for example to keep the Mac awake with the lid shut, but nothing else: no root shell and no other `pmset` settings. Remove it with `sudo rm /etc/sudoers.d/awake`.
+
 ## Config
 
 `~/.awake.conf` is created on first run with every setting commented out. It's sourced by bash, and flags win over it.
@@ -55,14 +67,14 @@ awake setpw         # optional: store your login password in the keychain
 | Concern | Mechanism | Restored by |
 |---|---|---|
 | Idle sleep | `caffeinate -i -s` | Ends with the supervisor |
-| Lid-close sleep | `sudo pmset -a disablesleep 1` | A root guard process, when the supervisor exits |
+| Lid-close sleep | `sudo pmset -a disablesleep 1` | A guard process, when the supervisor exits |
 | Screen lock | `sysadminctl -screenLock off` | The supervisor, using the password it holds in memory only |
 | Screen saver | `defaults -currentHost write com.apple.screensaver idleTime -int 0` | The supervisor |
 | Backlight with lid closed | The supervisor polls `ioreg` for the lid every 2s and sets brightness through `brightness.swift` (private DisplayServices API), built to `~/.awake.bright` with `swiftc` on first use | Set to 50% if awake ends with the lid closed |
 
 Previous values are saved in `~/.awake.*` while on, so the exact old state comes back, not a default. If `disablesleep` was already 1 before `on`, it stays 1 after `off`.
 
-Sudo is only used while you're at the keyboard. The root guard started by `on` handles the restore, so a timer expiring unattended never waits on a password or Touch ID prompt.
+A timer expiring unattended never waits on a password or Touch ID prompt. With the sudoers rule, the guard runs as you and calls `sudo -n pmset` at the end. Without it, `on` asks for sudo while you're there and starts the guard as root.
 
 ## Caveats
 
