@@ -285,8 +285,9 @@ sleepoff() {
   sudo -n pmset -a disablesleep 1 || return 1
   echo "$prev" > "$SLF"; alog "sleep: disablesleep $prev -> $(sleepread)"
 }
-# sudoers rule from `awake sudoers` installed? -k ignores a cached sudo login, so only the rule counts
-nopw() { sudo -k -n -l pmset -a disablesleep 0 >/dev/null 2>&1 && sudo -k -n -l pmset -a disablesleep 1 >/dev/null 2>&1; }
+# sudoers rule from `awake sudoers` installed? Rewrite the current value (a no-op) with -k, which ignores a
+# cached sudo login, and -n. Not `sudo -l`: that only says the command is allowed, not that it needs no password.
+nopw() { sudo -k -n pmset -a disablesleep "$(sleepread)" >/dev/null 2>&1; }
 # guard: restores when pid $1 is gone. kill -0 not `running`: the pid has not exec'd `awake _run` yet.
 # Runs as you if the sudoers rule allows pmset without a password, else as root (sudo -b) while sudo is fresh.
 sleepguard() {

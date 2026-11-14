@@ -20,7 +20,7 @@ cat > "$S/sudo" <<'E'
 echo "sudo $*" >> "$ST/sudo.log"
 [ -f "$ST/sudofail" ] && exit 1
 bg=
-while :; do case "$1" in -v) exit 0 ;; -n|-k) shift ;; -b) bg=1; shift ;; -l) [ -f "$ST/nopw" ]; exit ;; *) break ;; esac; done
+while :; do case "$1" in -v) exit 0 ;; -n) shift ;; -k) [ -f "$ST/nopw" ] || exit 1; shift ;; -b) bg=1; shift ;; *) break ;; esac; done
 export ROOT=1
 if [ -n "$bg" ]; then "$@" & exit 0; else exec "$@"; fi
 E
