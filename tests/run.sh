@@ -4,11 +4,12 @@ REPO=$(cd "$(dirname "$0")/.." && pwd)
 A=$REPO/awake.sh
 T=$(mktemp -d); export HOME=$T/home; S=$T/stub; mkdir -p "$HOME" "$S"; export ST=$T/state; mkdir -p "$ST"
 trap 'pkill -f "$T" 2>/dev/null; rm -rf "$T"' EXIT
+[ -n "$KEEP" ] && trap "pkill -f $T; echo kept $T" EXIT
 echo 0 > "$ST/sd"; echo "screenLock delay is 300 seconds" > "$ST/lock"
 cat > "$S/pmset" <<'E'
 #!/bin/bash
 case "$*" in
-  "-g batt") echo "Now drawing from 'AC Power'" ;;
+  "-g batt") [ -f "$ST/batt" ] && echo "Now drawing from 'Battery Power'" || echo "Now drawing from 'AC Power'" ;;
   "-g") printf ' SleepDisabled\t\t%s\n' "$(cat "$ST/sd")" ;;
   "-a disablesleep "*) [ "$ROOT" = 1 ] || { echo "pmset: not root" >&2; exit 1; }; echo "$3" > "$ST/sd" ;;
   "-g assertions") ;;
@@ -33,13 +34,20 @@ case "$3" in read) cat "$ST/ss" 2>/dev/null || exit 1 ;; write) echo "$7" > "$ST
 E
 printf '#!/bin/bash\nexit 1\n' > "$S/security"
 printf '#!/bin/bash\necho "caffeinate $*" >> "$ST/caf.log"\nexec /bin/sleep 300\n' > "$S/caffeinate"
+cat > "$S/ioreg" <<'E'
+#!/bin/bash
+echo "  |   \"AppleClamshellState\" = $(cat "$ST/lid")"
+E
+echo No > "$ST/lid"
+printf '#!/bin/bash\nexit 1\n' > "$S/swiftc"   # never build the real helper: it would change the real brightness
 chmod +x "$S"/*; export PATH=$S:$PATH
+printf '#!/bin/bash\necho "$1" >> "$ST/bright.log"\n' > "$HOME/.awake.bright"; chmod +x "$HOME/.awake.bright"
 
 pass=0; fail=0
 ok() { if eval "$2"; then echo "ok   $1"; pass=$((pass+1)); else echo "FAIL $1 [$2]"; fail=$((fail+1)); fi; }
 sd() { cat "$ST/sd"; }
 waitgone() { for _ in {1..20}; do [ -f "$HOME/.awake.disablesleep" ] || return 0; sleep .5; done; }
-reset() { "$A" off --password pw >/dev/null 2>&1; rm -f "$ST/sudo.log" "$ST/sudofail" "$HOME/.awake.conf" "$ST/caf.log"; echo "${1:-0}" > "$ST/sd"; }
+reset() { "$A" off --password pw >/dev/null 2>&1; rm -f "$ST/sudo.log" "$ST/sudofail" "$HOME/.awake.conf" "$ST/caf.log" "$ST/bright.log" "$ST/batt"; echo No > "$ST/lid"; echo "${1:-0}" > "$ST/sd"; }
 
 "$A" status >/dev/null
 ok "config created, all commented" '[ -f $HOME/.awake.conf ] && ! grep -qE "^[a-z]" $HOME/.awake.conf'
@@ -98,6 +106,24 @@ ok "config hours/display applied"  'grep -q -- "-d -t 10800" $ST/caf.log'
 
 reset; echo "hours=3" > "$HOME/.awake.conf"; "$A" on 2 --noroot --password pw >/dev/null; sleep 1
 ok "flag HOURS beats config"       'grep -q -- "-t 7200" $ST/caf.log'
+"$A" off >/dev/null
+
+reset; touch "$ST/batt"; SECONDS=0; out=$("$A" on 1 --password pw 2>&1)
+ok "battery: loud warning"         'echo "$out" | grep -q "ON BATTERY"'
+ok "battery: no pause"             '[ $SECONDS -lt 2 ]'
+"$A" off >/dev/null
+
+reset; "$A" on 1 --noroot --password pw >/dev/null; sleep 1
+ok "lid open at start: untouched"  '[ ! -f $ST/bright.log ]'
+echo Yes > "$ST/lid"; sleep 3
+ok "lid close: brightness 0"       '[ "$(tail -1 $ST/bright.log)" = 0 ]'
+echo No > "$ST/lid"; sleep 3
+ok "lid open: brightness 0.5"      '[ "$(tail -1 $ST/bright.log)" = 0.5 ]'
+echo Yes > "$ST/lid"; sleep 3; "$A" off >/dev/null; sleep 3
+ok "off with lid closed: back to 0.5" '[ "$(tail -1 $ST/bright.log)" = 0.5 ]'
+
+reset; echo dimlid=0 > "$HOME/.awake.conf"; "$A" on 1 --noroot --password pw >/dev/null; echo Yes > "$ST/lid"; sleep 3
+ok "config dimlid=0: untouched"    '[ ! -f $ST/bright.log ]'
 "$A" off >/dev/null
 
 reset; make -s -C "$REPO" install BINDIR="$T/bin" >/dev/null

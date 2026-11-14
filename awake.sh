@@ -10,6 +10,8 @@ SSF=$HOME/.awake.ssidle        # screen saver idleTime to restore (seconds or "u
 SLF=$HOME/.awake.disablesleep  # disablesleep value to restore (0 or 1); exists only while sleep is disabled
 LOGF=$HOME/.awake.log
 CONFF=$HOME/.awake.conf
+BRIGHT=$HOME/.awake.bright     # brightness helper, built from brightness.swift on first use
+SRCDIR=$(dirname "$(realpath "$0")")
 help() { cat <<'EOT'
 AWAKE(1)                      User Commands                      AWAKE(1)
 
@@ -71,6 +73,8 @@ CONFIG
         disablesleep=1  0 = do not run pmset, as --noroot
         lock=1          0 = leave the screen lock alone; no login password
         saver=1         0 = leave the screen saver alone
+        dimlid=1        0 = leave the built-in display brightness alone
+                        (1: 0 when the lid closes, 50% when it opens)
 
 PASSWORD SOURCES (first match wins)
     1. --password flag
@@ -130,6 +134,8 @@ HOW IT WORKS
 
 FILES
     ~/.awake.pid         supervisor pid; present only while on
+    ~/.awake.bright      brightness helper, compiled with swiftc from
+                         brightness.swift next to the script on first `on`
     ~/.awake.lockdelay   lock delay to restore (seconds or "immediate");
                          present only while the lock is relaxed
     ~/.awake.ssidle      screen saver idleTime to restore (seconds or
@@ -161,9 +167,15 @@ NUANCES
     - While on, System Settings > Lock Screen shows the saver as "Never";
       changing it there while on is overwritten by the restore on exit.
     - Starting `on` while on battery prints a loud red banner, rings the
-      terminal bell, and pauses 3s (Ctrl-C to cancel) before continuing;
+      terminal bell, and continues without pausing;
       `status` repeats the banner if it is still on while on battery. It
       does not block, and it does not alert if you unplug later.
+    - Lid dimming (dimlid=1): the supervisor polls the lid every 2s and sets
+      the built-in display to 0 when it closes, 50% when it opens (a fixed
+      level, not the previous one). If awake ends with the lid closed it sets
+      50% so the next open isn't black. Needs swiftc (Xcode Command Line
+      Tools) once to build the helper; without it, dimming is skipped and
+      logged.
     - While on, anyone with physical access can use the Mac once the display
       wakes. Do not leave it on unattended in public.
     - Other caffeinate processes or apps holding sleep assertions are
@@ -272,6 +284,24 @@ sleeprestore() {   # interactive path for `off`, when the guard is gone
   if sudo pmset -a disablesleep "$prev"; then rm -f "$SLF"; alog "sleep: restored disablesleep to $prev"
   else echo "failed to restore disablesleep to $prev; run \`awake off\` again" >&2; alog "sleep: restore failed"; fi
 }
+brightok() {   # (re)build the helper if missing or older than its source; needs swiftc (Xcode CLT)
+  [ -x "$BRIGHT" ] && [ ! "$SRCDIR/brightness.swift" -nt "$BRIGHT" ] && return 0
+  swiftc -O "$SRCDIR/brightness.swift" -o "$BRIGHT" 2>>"$LOGF" && return 0
+  alog "lid: cannot build brightness helper, lid dimming off"; return 1
+}
+lidwatch() {   # $1 = supervisor pid. Built-in display to 0 when the lid closes, 0.5 when it opens
+  local was=No now
+  while kill -0 "$1" 2>/dev/null; do
+    now=$(ioreg -r -k AppleClamshellState -d 1 | awk '/"AppleClamshellState"/ { print $NF; exit }')
+    if [ -n "$now" ] && [ "$now" != "$was" ]; then
+      if [ "$now" = Yes ]; then "$BRIGHT" 0 && alog "lid: closed, brightness 0"
+      else "$BRIGHT" 0.5 && alog "lid: opened, brightness 0.5"; fi
+      was=$now
+    fi
+    sleep 2
+  done
+  [ "$was" = Yes ] && "$BRIGHT" 0.5 && alog "lid: awake ended with lid closed, brightness 0.5"   # don't wake up to a black screen
+}
 restore() {   # saver first: needs no password, so it runs even if the lock restore fails
   ssrestore
   local prev; prev=$(cat "$PREVF" 2>/dev/null) || return 0
@@ -285,8 +315,9 @@ for a in "$@"; do case "$a" in --help|-h|help) help; exit 0 ;; esac; done
 # disablesleep=1   # 0 = do not run `sudo pmset -a disablesleep 1`, as --noroot
 # lock=1           # 0 = leave the screen lock alone; no login password needed
 # saver=1          # 0 = leave the screen saver alone
+# dimlid=1         # 0 = leave brightness alone (1 = built-in display to 0 on lid close, 50% on open)
 EOT
-hours=6; display=0; disablesleep=1; lock=1; saver=1
+hours=6; display=0; disablesleep=1; lock=1; saver=1; dimlid=1
 . "$CONFF"
 cmd=${1:-status}; shift; PW=; DISP=; pos=()
 [ "$display" = 1 ] && DISP=1
@@ -298,7 +329,7 @@ case "$cmd" in
   on)
     running && { echo "already on (pid $(cat "$PIDF"))"; exit 0; }
     h=${2:-$hours}
-    on_battery && { warn_battery "$disablesleep"; sleep 3; }
+    on_battery && warn_battery "$disablesleep"
     if [ "$disablesleep" = 1 ]; then   # authenticate while someone is here, before anything changes
       sudo -v || { echo "sudo failed, nothing changed (--noroot skips disablesleep)"; alog "on: sudo failed"; exit 1; }
     elif [ -f "$SLF" ]; then
@@ -331,6 +362,7 @@ case "$cmd" in
     read -r PW
     args=(-i -s); [ -n "$DISP" ] && args+=(-d); [ "$2" != 0 ] && args+=(-t $((${2:-6} * 3600)))
     caffeinate "${args[@]}" & cpid=$!; alog "supervisor: caffeinate ${args[*]} (pid $cpid)"
+    [ "$dimlid" = 1 ] && brightok && { lidwatch $$ & }
     trap 'kill $cpid 2>/dev/null' TERM INT HUP
     while kill -0 $cpid 2>/dev/null; do wait $cpid; done
     alog "supervisor: caffeinate ended, restoring"; restore; rm -f "$PIDF"; alog "supervisor: exit" ;;

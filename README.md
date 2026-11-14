@@ -48,6 +48,7 @@ awake setpw         # optional: store your login password in the keychain
 | `disablesleep` | `1` | `0` skips `pmset`, as `--noroot` |
 | `lock` | `1` | `0` leaves the screen lock alone; no login password needed |
 | `saver` | `1` | `0` leaves the screen saver alone |
+| `dimlid` | `1` | `0` leaves brightness alone; `1` sets the built-in display to 0 when the lid closes and 50% when it opens |
 
 ## How it works
 
@@ -57,6 +58,7 @@ awake setpw         # optional: store your login password in the keychain
 | Lid-close sleep | `sudo pmset -a disablesleep 1` | A root guard process, when the supervisor exits |
 | Screen lock | `sysadminctl -screenLock off` | The supervisor, using the password it holds in memory only |
 | Screen saver | `defaults -currentHost write com.apple.screensaver idleTime -int 0` | The supervisor |
+| Backlight with lid closed | The supervisor polls `ioreg` for the lid every 2s and sets brightness through `brightness.swift` (private DisplayServices API), built to `~/.awake.bright` with `swiftc` on first use | Set to 50% if awake ends with the lid closed |
 
 Previous values are saved in `~/.awake.*` while on, so the exact old state comes back, not a default. If `disablesleep` was already 1 before `on`, it stays 1 after `off`.
 
@@ -67,6 +69,7 @@ Sudo is only used while you're at the keyboard. The root guard started by `on` h
 - **Closing the lid doesn't sleep the Mac.** In a bag it drains the battery and runs hot. Use `--noroot` if you might carry it while on.
 - **The Mac doesn't lock.** Anyone with physical access can use it, so don't leave it on unattended in public.
 - **After a reboot or crash while on,** settings can stay changed. Run `awake off` to restore them.
+- Lid dimming needs `swiftc` (Xcode Command Line Tools) once. Without it, dimming is skipped and logged in `~/.awake.log`. On lid open the level is a fixed 50%, not what it was before.
 - Critical battery and overheating can still force sleep.
 
 ## Tests
