@@ -1,7 +1,7 @@
 #!/bin/bash
 # awake on [hours] [--display] [--noroot|--allowlidsleep] [--password PW] | off | setpw | status -- never sleep
 # (even lid closed), never lock, no screen saver; display may still turn off per System Settings (unless --display)
-# (default 6h, 0 = until `awake off`). `on` asks for your login password once (sysadminctl needs it to
+# (default 0 = until `awake off`). `on` asks for your login password once (sysadminctl needs it to
 # change the lock delay); the background supervisor keeps it in memory only and restores the old delay on exit.
 # `on` also runs `sudo pmset -a disablesleep 1`; a guard started then restores it when the supervisor exits.
 # `awake sudoers` prints a rule that makes that passwordless, so `on` never prompts.
@@ -36,7 +36,7 @@ DESCRIPTION
 
 COMMANDS
     on [HOURS]
-        Start. HOURS is optional; default 6 (see CONFIG). HOURS=0 means no
+        Start. HOURS is optional; default 0 (see CONFIG), meaning no
         timeout (until `awake off`). Integers only. If already on, prints the
         pid and exits; a different HOURS is ignored (run `awake off` first).
     off
@@ -79,7 +79,7 @@ OPTIONS
 CONFIG
     ~/.awake.conf is sourced by bash on every run, and created on first run
     with every setting commented out. Command-line flags win over it.
-        hours=6         default HOURS for `awake on`
+        hours=0         default HOURS for `awake on` (0 = until off)
         display=0       1 = keep the display on, as --display
         disablesleep=1  0 = do not run pmset, as --noroot
         lock=1          0 = leave the screen lock alone; no login password
@@ -134,8 +134,10 @@ HOW IT WORKS
           -> start a detached supervisor `awake _run HOURS [--display]` with
           the password on its stdin -> write supervisor pid to ~/.awake.pid
           -> start the guard on that pid.
-    supervisor: runs caffeinate, waits for it. When caffeinate exits (timer
-          expired) or the supervisor gets TERM/INT/HUP, it restores the saved
+    supervisor: runs caffeinate and owns the deadline. If caffeinate exits
+          before the deadline (another process ran `killall caffeinate`),
+          it starts a new one for the remaining time. When the deadline
+          passes or the supervisor gets TERM/INT/HUP, it restores the saved
           idleTime and lock delay and deletes ~/.awake.pid. The password
           lives only in its memory.
     guard: you (sudoers rule) or root; when the supervisor pid is gone, restores disablesleep and
@@ -228,9 +230,8 @@ EXIT STATUS
 
 EXAMPLES
     awake setpw            # one-time
-    awake on               # 6 hours
+    awake on               # until `awake off`
     awake on 2             # 2 hours
-    awake on 0             # until `awake off`
     awake on 12 --display  # 12 hours, display kept on too
     awake on --noroot      # no sudo; lid close sleeps as usual
     awake status
@@ -330,14 +331,14 @@ restore() {   # saver first: needs no password, so it runs even if the lock rest
 for a in "$@"; do case "$a" in --help|-h|help) help; exit 0 ;; esac; done
 [ -f "$CONFF" ] || cat > "$CONFF" <<'EOT'
 # awake config, sourced by bash. Uncomment to change a default; flags win over these. See `awake --help`.
-# hours=6          # default HOURS for `awake on` (0 = until `awake off`)
+# hours=0          # default HOURS for `awake on` (0 = until `awake off`)
 # display=0        # 1 = also keep the display on, as --display
 # disablesleep=1   # 0 = do not run `sudo pmset -a disablesleep 1`, as --noroot
 # lock=1           # 0 = leave the screen lock alone; no login password needed
 # saver=1          # 0 = leave the screen saver alone
 # dimlid=1         # 0 = leave brightness alone (1 = built-in display to 0 on lid close, 50% on open)
 EOT
-hours=6; display=0; disablesleep=1; lock=1; saver=1; dimlid=1
+hours=0; display=0; disablesleep=1; lock=1; saver=1; dimlid=1
 . "$CONFF"
 cmd=${1:-status}; shift; PW=; DISP=; pos=()
 [ "$display" = 1 ] && DISP=1
@@ -379,13 +380,22 @@ case "$cmd" in
     alog "on: ${h}h${DISP:+ --display}, lock=$lock saver=$saver disablesleep=$disablesleep, supervisor pid $pid"
     echo "awake on ($([ "$h" = 0 ] && echo until off || echo "${h}h")), lock=$lock saver=$saver disablesleep=$disablesleep${DISP:+, display kept on}, pid $pid" ;;
   _run)   # supervisor: password on stdin
+    # The supervisor owns the deadline, not caffeinate: if something else kills caffeinate (`killall caffeinate`),
+    # it is restarted for the remaining time instead of ending awake. Only `off` (TERM) or the deadline end it.
     read -r PW
-    args=(-i -s); [ -n "$DISP" ] && args+=(-d); [ "$2" != 0 ] && args+=(-t $((${2:-6} * 3600)))
-    caffeinate "${args[@]}" & cpid=$!; alog "supervisor: caffeinate ${args[*]} (pid $cpid)"
+    h=${2:-0}; end=0; [ "$h" != 0 ] && end=$((SECONDS + h * ${AWAKE_HOUR:-3600}))   # AWAKE_HOUR: tests only
     [ "$dimlid" = 1 ] && brightok && { lidwatch $$ & }
-    trap 'kill $cpid 2>/dev/null' TERM INT HUP
-    while kill -0 $cpid 2>/dev/null; do wait $cpid; done
-    alog "supervisor: caffeinate ended, restoring"; restore; rm -f "$PIDF"; alog "supervisor: exit" ;;
+    stop=; cpid=; trap 'stop=1; [ -n "$cpid" ] && kill $cpid 2>/dev/null' TERM INT HUP
+    while [ -z "$stop" ]; do
+      args=(-i -s); [ -n "$DISP" ] && args+=(-d)
+      if [ "$end" != 0 ]; then left=$((end - SECONDS)); [ $left -le 0 ] && break; args+=(-t $left); fi
+      caffeinate "${args[@]}" & cpid=$!; alog "supervisor: caffeinate ${args[*]} (pid $cpid)"
+      while kill -0 $cpid 2>/dev/null; do wait $cpid; done
+      [ -n "$stop" ] && break
+      [ "$end" != 0 ] && [ $SECONDS -ge "$end" ] && break
+      alog "supervisor: caffeinate $cpid ended early (killed by something else?), restarting"; sleep 1
+    done
+    alog "supervisor: $([ -n "$stop" ] && echo stopped || echo time up), restoring"; restore; rm -f "$PIDF"; alog "supervisor: exit" ;;
   off)
     if running; then
       kill "$(cat "$PIDF")"

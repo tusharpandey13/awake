@@ -33,7 +33,7 @@ cat > "$S/defaults" <<'E'
 case "$3" in read) cat "$ST/ss" 2>/dev/null || exit 1 ;; write) echo "$7" > "$ST/ss" ;; delete) rm -f "$ST/ss" ;; esac
 E
 printf '#!/bin/bash\nexit 1\n' > "$S/security"
-printf '#!/bin/bash\necho "caffeinate $*" >> "$ST/caf.log"\nexec /bin/sleep 300\n' > "$S/caffeinate"
+printf '#!/bin/bash\necho "caffeinate $*" >> "$ST/caf.log"\nt=300; [ "$3" = -t ] && t=$4\nexec -a caffeinate /bin/sleep $t\n' > "$S/caffeinate"
 cat > "$S/ioreg" <<'E'
 #!/bin/bash
 echo "  |   \"AppleClamshellState\" = $(cat "$ST/lid")"
@@ -72,8 +72,18 @@ for f in --noroot --allowlidsleep; do
   "$A" off >/dev/null
 done
 
-reset; "$A" on 1 --password pw >/dev/null; pid=$(cat "$HOME/.awake.pid")
-pkill -P "$pid"; waitgone    # timer expiry: caffeinate ends, supervisor exits, nobody at the keyboard
+reset; "$A" on --password pw >/dev/null; pid=$(cat "$HOME/.awake.pid"); sleep 1
+ok "default hours: no timeout"     'grep -q "^caffeinate -i -s$" $ST/caf.log'
+pkill -P "$pid" -x caffeinate; sleep 2        # another agent kills every caffeinate
+ok "caffeinate killed: awake survives" '"$A" status | grep -q "awake: ON" && [ "$(sd)" = 1 ] && grep -q off $ST/lock'
+ok "caffeinate killed: restarted"  '[ $(grep -c . $ST/caf.log) = 2 ] && pgrep -P "$pid" -x caffeinate >/dev/null'
+"$A" off >/dev/null
+ok "off after restart: restored"   '[ "$(sd)" = 0 ] && grep -q "300 seconds" $ST/lock && [ ! -f $HOME/.awake.pid ]'
+
+reset; AWAKE_HOUR=6 "$A" on 1 --password pw >/dev/null; sleep 1
+pkill -P "$(cat $HOME/.awake.pid)" -x caffeinate; sleep 1.5
+ok "kill before deadline: restarted with time left" 'tail -1 $ST/caf.log | grep -qE -- "-t [1-4]$"'
+waitgone    # timer expiry: supervisor exits, nobody at the keyboard
 ok "timer expiry: guard restored"  '[ "$(sd)" = 0 ] && [ ! -f $HOME/.awake.disablesleep ]'
 ok "timer expiry: lock restored"   'grep -q "300 seconds" $ST/lock'
 
@@ -110,7 +120,7 @@ ok "flag HOURS beats config"       'grep -q -- "-t 7200" $ST/caf.log'
 
 reset; touch "$ST/nopw"; "$A" on 1 --password pw >/dev/null
 ok "sudoers rule: no sudo -v, no root guard" '! grep -qE "sudo (-v|.*-b)" $ST/sudo.log && [ "$(sd)" = 1 ]'
-pid=$(cat "$HOME/.awake.pid"); pkill -P "$pid"; waitgone
+"$A" off >/dev/null
 ok "sudoers rule: guard as you restores" '[ "$(sd)" = 0 ] && [ ! -f $HOME/.awake.disablesleep ]'
 ok "sudoers rule printed"          '"$A" sudoers | grep -q "NOPASSWD: /usr/bin/pmset -a disablesleep 0, /usr/bin/pmset -a disablesleep 1"'
 

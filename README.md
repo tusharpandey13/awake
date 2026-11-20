@@ -19,9 +19,8 @@ This symlinks `awake.sh` to `~/bin/awake`, so keep the clone. Use `make install 
 ## Usage
 
 ```sh
-awake on            # 6 hours
+awake on            # until `awake off`
 awake on 2          # 2 hours
-awake on 0          # until `awake off`
 awake on --display  # keep the display on too
 awake on --noroot   # no sudo; closing the lid sleeps as usual
 awake status
@@ -55,7 +54,7 @@ Any process running as you can then toggle `disablesleep`, for example to keep t
 
 | Setting | Default | Effect |
 |---|---|---|
-| `hours` | `6` | Default duration for `awake on` (`0` = until `awake off`) |
+| `hours` | `0` | Default duration for `awake on` (`0` = until `awake off`) |
 | `display` | `0` | `1` keeps the display on, as `--display` |
 | `disablesleep` | `1` | `0` skips `pmset`, as `--noroot` |
 | `lock` | `1` | `0` leaves the screen lock alone; no login password needed |
@@ -66,7 +65,7 @@ Any process running as you can then toggle `disablesleep`, for example to keep t
 
 | Concern | Mechanism | Restored by |
 |---|---|---|
-| Idle sleep | `caffeinate -i -s` | Ends with the supervisor |
+| Idle sleep | `caffeinate -i -s`, restarted by the supervisor if something else kills it | Ends with the supervisor |
 | Lid-close sleep | `sudo pmset -a disablesleep 1` | A guard process, when the supervisor exits |
 | Screen lock | `sysadminctl -screenLock off` | The supervisor, using the password it holds in memory only |
 | Screen saver | `defaults -currentHost write com.apple.screensaver idleTime -int 0` | The supervisor |
